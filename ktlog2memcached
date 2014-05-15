@@ -22,7 +22,7 @@ else {
     $options{host} ||= "localhost";
     $options{port} ||= 11211;
     $config = {
-        servers => "$options{host}:$options{port}",
+        servers => [ "$options{host}:$options{port}" ],
     };
 }
 my $cache = Cache::Memcached->new($config);
@@ -47,7 +47,6 @@ while (my $line = <>) {
 
         # parse memcached flag
         my (undef, undef, undef, $flag) = unpack("C*", substr($value, -4, 4, ""));
-
         # restore Perl's value
         if ($flag & Cache::Memcached::F_COMPRESS) {
             $value = Compress::Zlib::memGunzip($value);
