@@ -12,8 +12,10 @@ use Config::PL;
 GetOptions(\my %options, qw/
     config=s
     host=s
-    port=s
+    port=i
+    use-flag
 /) or pod2usage(2);
+
 my $config;
 if (defined $options{config}) {
     $config = config_do $options{config};
@@ -31,9 +33,10 @@ LOG:
 while (my $line = <>) {
     chomp $line;
     my ($rts, $rsid, $rdbid, $rcmd, $key, $value) = split /\t/, $line;
-    $key = decode_base64($key);
+    next if !defined $rts;
 
     if ($rcmd eq "set") {
+        $key = decode_base64($key);
         $value = decode_base64($value);
 
         # parse expire time (first 5 bytes, big endian int)
@@ -45,25 +48,29 @@ while (my $line = <>) {
         # not expire
         undef $xt if $xt >= 2 ** 32;
 
-        # parse memcached flag
-        my (undef, undef, undef, $flag) = unpack("C*", substr($value, -4, 4, ""));
-        # restore Perl's value
-        if ($flag & Cache::Memcached::F_COMPRESS) {
-            $value = Compress::Zlib::memGunzip($value);
-        }
-        if ($flag & Cache::Memcached::F_STORABLE) {
-            eval {
-                $value = Storable::thaw($value);
-            };
-            if ($@) {
-                warn "couldn't restore value. SKIP.\n$line\n";
-                next LOG;
+        if ($options{"use-flag"}) {
+            # parse memcached flag
+            my (undef, undef, undef, $flag) = unpack("C*", substr($value, -4, 4, ""));
+            # restore Perl's value
+            if ($flag & Cache::Memcached::F_COMPRESS) {
+                $value = Compress::Zlib::memGunzip($value);
+            }
+            if ($flag & Cache::Memcached::F_STORABLE) {
+                eval {
+                    $value = Storable::thaw($value);
+                };
+                if ($@) {
+                    warn "couldn't restore value. SKIP.\n$line\n";
+                    next LOG;
+                }
             }
         }
+
         $cache->set($key, $value, $xt)
             or warn "set $key FAILED.\n$line\n";
     }
     elsif ($rcmd eq "remove") {
+        $key = decode_base64($key);
         $cache->delete($key)
             or warn "delete $key FAILED.\n$line\n";
     }
@@ -75,25 +82,39 @@ while (my $line = <>) {
 
 __END__
 
-=head1 SYNOPSIS
-
-    ktremotemgr slave -ts `date +%s000000000` -uw | ktlog2memcached --host 127.0.0.1 --port 11211
-
 =head1 DESCRIPTION
 
 ktlog2memcached is KyotoTycoon's slave agent, replicate updates to memcached.
 
-See also http://fallabs.com/blog-ja/promenade.cgi?id=115 (Japanese language).
+=head1 SYNOPSIS
 
-=head1 Configuration
+    ktremotemgr slave -ts `date +%s000000000` -uw | ktlog2memcached --host 127.0.0.1 --port 11211
 
-=head2 Replicate to sigle memcached
+See also http://fallabs.com/blog-ja/promenade.cgi?id=115 .
 
-    ktlog2memcached --host memcached_hostname --port memcached_port
+=head2 Options
 
-=head2 More complex configuration
+=over 4
 
-You may write config.pl to create memcached client object.
+=item host
+
+memcached host (hostname or IP address). default: "localhost".
+
+=item port
+
+memcached port. default: 11211.
+
+=item use-flag
+
+If you are running a KyotoTycoon with a memcached plugin and you access via memcached client, memcached's flag value was appended at the end of each record value.
+
+Cache::Memcached(perl library) is using the flag for detect type of value (raw, structured, compressed).
+
+If "use-flag" is specified, ktlog2memcached handle the flag as same of Cache::Memcached.
+
+=item config
+
+You may write config.pl to pass the options to Cache::Memcached->new().
 
     # config.pl
     {
@@ -104,11 +125,13 @@ You may write config.pl to create memcached client object.
 
     ktlog2memcached --config config.pl
 
+=back
+
 =head1 LICENSE
 
 Copyright (C) FUJIWARA Shunichiro.
 
-This library is free software; you can redistribute it and/or modify
+This software is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.
 
 =head1 AUTHOR
