@@ -1,0 +1,119 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use MIME::Base64;
+use Storable qw/ thaw /;
+use Cache::Memcached;
+use Pod::Usage qw/pod2usage/;
+use Getopt::Long qw/GetOptions :config auto_help pass_through/;
+use Compress::Zlib;
+use Config::PL;
+
+GetOptions(\my %options, qw/
+    config=s
+    host=s
+    port=s
+/) or pod2usage(2);
+my $config;
+if (defined $options{config}) {
+    $config = config_do $options{config};
+}
+else {
+    $options{host} ||= "localhost";
+    $options{port} ||= 11211;
+    $config = {
+        servers => "$options{host}:$options{port}",
+    };
+}
+my $cache = Cache::Memcached->new($config);
+
+LOG:
+while (my $line = <>) {
+    chomp $line;
+    my ($rts, $rsid, $rdbid, $rcmd, $key, $value) = split /\t/, $line;
+    $key = decode_base64($key);
+
+    if ($rcmd eq "set") {
+        $value = decode_base64($value);
+
+        # parse expire time (first 5 bytes, big endian int)
+        my @nums = unpack("C5", substr($value, 0, 5, ""));
+        my $xt = 0;
+        for my $num (@nums) {
+            $xt = ($xt << 8) + $num;
+        }
+        # not expire
+        undef $xt if $xt >= 2 ** 32;
+
+        # parse memcached flag
+        my (undef, undef, undef, $flag) = unpack("C*", substr($value, -4, 4, ""));
+
+        # restore Perl's value
+        if ($flag & Cache::Memcached::F_COMPRESS) {
+            $value = Compress::Zlib::memGunzip($value);
+        }
+        if ($flag & Cache::Memcached::F_STORABLE) {
+            eval {
+                $value = Storable::thaw($value);
+            };
+            if ($@) {
+                warn "couldn't restore value. SKIP.\n$line\n";
+                next LOG;
+            }
+        }
+        $cache->set($key, $value, $xt)
+            or warn "set $key FAILED.\n$line\n";
+    }
+    elsif ($rcmd eq "remove") {
+        $cache->delete($key)
+            or warn "delete $key FAILED.\n$line\n";
+    }
+    elsif ($rcmd eq "clear") {
+        $cache->flush_all
+            or warn "flush_all FAILED.\n$line\n";
+    }
+}
+
+__END__
+
+=head1 SYNOPSIS
+
+    ktremotemgr slave -ts `date +%s000000000` -uw | ktlog2memcached --host 127.0.0.1 --port 11211
+
+=head1 DESCRIPTION
+
+ktlog2memcached is KyotoTycoon's slave agent, replicate updates to memcached.
+
+See also http://fallabs.com/blog-ja/promenade.cgi?id=115 (Japanese language).
+
+=head1 Configuration
+
+=head2 Replicate to sigle memcached
+
+    ktlog2memcached --host memcached_hostname --port memcached_port
+
+=head2 More complex configuration
+
+You may write config.pl to create memcached client object.
+
+    # config.pl
+    {
+        servers => ["...", "..."],
+        compress_threshold => 1024,
+        # ... and more options
+    });
+
+    ktlog2memcached --config config.pl
+
+=head1 LICENSE
+
+Copyright (C) FUJIWARA Shunichiro.
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=head1 AUTHOR
+
+FUJIWARA Shunichiro E<lt>fujiwara.shunichiro@gmail.comE<gt>
+
+=cut
